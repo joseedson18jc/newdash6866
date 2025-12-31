@@ -1,0 +1,46 @@
+# UMatch Financial Control - Python Dependencies
+# Backend Services for CSV Processing and AI Categorization
+
+# Core Dependencies
+anthropic==0.71.2
+openai==1.52.0
+python-dotenv==1.0.1
+
+# Data Processing
+pandas==2.2.3
+openpyxl==3.11.0
+papaparse==5.5.3
+
+# Database
+mysql-connector-python==8.4.0
+sqlalchemy==2.0.36
+drizzle-orm==0.45.1
+
+# API & Web
+fastapi==0.115.0
+uvicorn==0.30.0
+pydantic==2.8.2
+requests==2.32.3
+
+# File Processing
+python-multipart==0.0.9
+aiofiles==23.2.1
+
+# Utilities
+python-dateutil==2.9.0
+pytz==2024.1
+uuid==1.30
+
+# Development
+pytest==8.2.2
+pytest-asyncio==0.24.0
+black==24.8.0
+flake8==7.1.1
+mypy==1.11.2
+
+# Optional: For advanced features
+redis==5.0.1
+celery==5.4.0
+python-jose==3.3.0
+passlib==1.7.4
+bcrypt==4.2.0
