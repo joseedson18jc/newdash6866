@@ -31,17 +31,67 @@ Currency Assumptions:
 import pandas as pd
 import numpy as np
 from sklearn.linear_model import LinearRegression
-from datetime import datetime
 import io
 import logging
 from typing import List, Dict, Any
-from collections import defaultdict
 import unicodedata
 from models import MappingItem, PnLItem, PnLResponse, DashboardData
 
 # Configure logging for financial calculations
 logger = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+
+def normalize_text_helper(s: Any) -> str:
+    """
+    Normalize text for consistent case-insensitive matching.
+    
+    Converts to lowercase, strips whitespace, and removes diacritical marks
+    (accents) to enable robust fuzzy matching of cost centers and supplier names.
+    
+    Args:
+        s: Input string or value to normalize (can be NaN, None, or any type).
+        
+    Returns:
+        Normalized lowercase string without accents, or empty string for NaN/None.
+        
+    Examples:
+        >>> normalize_text_helper("São Paulo  ")
+        'sao paulo'
+        >>> normalize_text_helper("TÉCNICO")
+        'tecnico'
+        >>> normalize_text_helper(None)
+        ''
+    """
+    if pd.isna(s):
+        return ""
+    s = str(s).strip().lower()
+    s = unicodedata.normalize("NFKD", s)
+    return "".join(ch for ch in s if not unicodedata.combining(ch))
+
+
+# Centralized constants for payroll detection
+PAYROLL_COST_CENTER = "Wages Expenses"
+"""Cost center name for all payroll-related transactions."""
+
+PAYROLL_KEYWORDS = [
+    normalize_text_helper(k)
+    for k in [
+        "folha de pagamento",
+        "folha pagamento",
+        "folha",
+        "pro labore",
+        "pro-labore",
+        "pró labore",
+        "pró-labore",
+        "salario",
+        "salário",
+        "holerite",
+        "prestador de servico pj",
+        "payroll",
+    ]
+]
+"""Pre-normalized list of keywords that indicate payroll-related transactions."""
 
 def process_upload(file_content: bytes) -> pd.DataFrame:
     """
@@ -279,12 +329,6 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
 
     # Ensure payroll transactions are routed to Wages Expenses (P&L line 62)
     # This enforces consistent categorization even if cost center is wrong in Conta Azul
-    payroll_keywords = [
-        'folha de pagamento', 'folha pagamento', 'folha',
-        'pro labore', 'pro-labore', 'pró labore', 'pró-labore',
-        'salario', 'salário', 'holerite',
-        'prestador de servico pj', 'payroll'
-    ]
 
     def enforce_wages_cost_center(row):
         """
@@ -297,19 +341,20 @@ def process_upload(file_content: bytes) -> pd.DataFrame:
         cc_norm = normalize_text_helper(current_cc)
 
         # Already correctly tagged - no change needed
-        if cc_norm == 'wages expenses':
-            return 'Wages Expenses'
+        if cc_norm == normalize_text_helper(PAYROLL_COST_CENTER):
+            return PAYROLL_COST_CENTER
 
-        # Build combined search text from multiple fields
+        # Build combined search text from multiple fields (including cost center itself)
         combined_text = ' '.join([
+            cc_norm,
             normalize_text_helper(row.get('Categoria 1', '')),
             normalize_text_helper(row.get('Descrição', '')),
             normalize_text_helper(row.get('Nome do fornecedor/cliente', ''))
         ])
 
         # Check if any payroll keyword appears in combined text
-        if any(keyword in combined_text for keyword in payroll_keywords):
-            return 'Wages Expenses'
+        if any(keyword in combined_text for keyword in PAYROLL_KEYWORDS):
+            return PAYROLL_COST_CENTER
 
         # No payroll indicators - keep original cost center
         return current_cc
@@ -360,9 +405,9 @@ def get_initial_mappings() -> List[MappingItem]:
         )
 
     mappings = [
-        # RECEITAS (Revenues)
-        m("Receita Google", "GOOGLE BRASIL PAGAMENTOS LTDA", 25, "Receita", "Receita Google Play"),
-        m("Receita Apple", "App Store (Apple)", 33, "Receita", "Receita App Store"),
+        # RECEITAS (Revenues) - Uses exact names from Conta Azul exports
+        m("Google Play Net Revenue", "GOOGLE BRASIL PAGAMENTOS LTDA", 25, "Receita", "Receita Google Play"),
+        m("App Store Net Revenue", "App Store (Apple)", 33, "Receita", "Receita App Store"),
         m("Rendimentos de Aplicações", "CONTA SIMPLES", 38, "Receita", "Rendimentos CDI"),
         m("Rendimentos de Aplicações", "BANCO INTER", 38, "Receita", "Rendimentos Inter"),
         
@@ -420,32 +465,6 @@ def get_initial_mappings() -> List[MappingItem]:
     ]
     return mappings
 
-def normalize_text_helper(s: Any) -> str:
-    """
-    Normalize text for consistent case-insensitive matching.
-    
-    Converts to lowercase, strips whitespace, and removes diacritical marks
-    (accents) to enable robust fuzzy matching of cost centers and supplier names.
-    
-    Args:
-        s: Input string or value to normalize (can be NaN, None, or any type).
-        
-    Returns:
-        Normalized lowercase string without accents, or empty string for NaN/None.
-        
-    Examples:
-        >>> normalize_text_helper("São Paulo  ")
-        'sao paulo'
-        >>> normalize_text_helper("TÉCNICO")
-        'tecnico'
-        >>> normalize_text_helper(None)
-        ''
-    """
-    if pd.isna(s):
-        return ""
-    s = str(s).strip().lower()
-    s = unicodedata.normalize("NFKD", s)
-    return "".join(ch for ch in s if not unicodedata.combining(ch))
 
 def prepare_mappings(mappings: List[MappingItem]):
     """
@@ -657,12 +676,10 @@ def calculate_pnl(df: pd.DataFrame, mappings: List[MappingItem], overrides: Dict
         # Line 38: Investment Income (interest, CDI yields)
         # Line 49: Miscellaneous revenue (if any)
         
-        # NOTE: abs() used here enforces positive revenue display convention
-        # Refunds are mapped to Line 90 (Other Expenses) to preserve revenue as gross sales
-        # See logic_CORRECTED.py for version that preserves sign for net revenue calculation
-        google_rev = abs(line_values[25].get(m, 0.0))
-        apple_rev = abs(line_values[33].get(m, 0.0))
-        invest_income = abs(line_values[38].get(m, 0.0)) + abs(line_values[49].get(m, 0.0))
+        # IMPORTANT: Preserve sign to allow refunds/chargebacks to reduce revenue
+        google_rev = line_values[25].get(m, 0.0)
+        apple_rev = line_values[33].get(m, 0.0)
+        invest_income = line_values[38].get(m, 0.0) + line_values[49].get(m, 0.0)
         
         total_revenue = google_rev + apple_rev + invest_income
         revenue_no_tax = google_rev + apple_rev  # Excludes investment income for fee calculation
